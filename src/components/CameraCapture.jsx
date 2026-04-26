@@ -11,66 +11,47 @@ export function CameraCapture({ onCapture, onCancel }) {
   const [canFlip, setCanFlip] = useState(false)
 
   useEffect(() => {
-    let cancelled = false
-    const videoElement = videoRef.current
-
-    async function openCamera() {
-      try {
-        setIsStarting(true)
-        setError('')
-        stopCamera()
-
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            facingMode: { ideal: facingMode },
-          },
-          audio: false,
-        })
-
-        if (cancelled) {
-          stream.getTracks().forEach((track) => track.stop())
-          return
-        }
-
-        streamRef.current = stream
-
-        if (videoElement) {
-          videoElement.srcObject = stream
-          await videoElement.play()
-        }
-
-        setIsActive(true)
-
-        if (navigator.mediaDevices?.enumerateDevices) {
-          const devices = await navigator.mediaDevices.enumerateDevices()
-          const videoInputs = devices.filter((device) => device.kind === 'videoinput')
-          setCanFlip(videoInputs.length > 1)
-        }
-      } catch (err) {
-        if (cancelled) return
-        setIsActive(false)
-        setError(`Camera access failed: ${err.message}`)
-      } finally {
-        if (!cancelled) {
-          setIsStarting(false)
-        }
-      }
-    }
-
-    openCamera()
+    startCamera(facingMode)
 
     return () => {
-      cancelled = true
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop())
-        streamRef.current = null
-      }
-      if (videoElement) {
-        videoElement.srcObject = null
-      }
-      setIsActive(false)
+      stopCamera()
     }
   }, [facingMode])
+
+  async function startCamera(nextFacingMode) {
+    try {
+      setIsStarting(true)
+      setError('')
+      stopCamera()
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: nextFacingMode },
+        },
+        audio: false,
+      })
+
+      streamRef.current = stream
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+        await videoRef.current.play()
+      }
+
+      setIsActive(true)
+
+      if (navigator.mediaDevices?.enumerateDevices) {
+        const devices = await navigator.mediaDevices.enumerateDevices()
+        const videoInputs = devices.filter((device) => device.kind === 'videoinput')
+        setCanFlip(videoInputs.length > 1)
+      }
+    } catch (err) {
+      setIsActive(false)
+      setError(`Camera access failed: ${err.message}`)
+    } finally {
+      setIsStarting(false)
+    }
+  }
 
   function capturePhoto() {
     if (!videoRef.current || !canvasRef.current) return

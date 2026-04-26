@@ -8,8 +8,9 @@ import {
 import { ingredientRules, ingredientSynonyms, regionLabels } from './data/ingredientRules'
 import { storeCatalog, stores } from './data/storeCatalog'
 import { auth } from './firebase'
-import { analyzeIngredients, deriveCategory, findAlternatives } from './lib/analyzeIngredients'
+import { analyzeIngredients, deriveCategory } from './lib/analyzeIngredients'
 import { findFdaMatches, loadFoodSubstances } from './lib/foodSubstances'
+import { getHealthyRecommendations } from './lib/geminiRecommendations'
 import { saveScan, getUserScans, deleteScan } from './lib/scanHistory'
 import { extractTextFromImage } from './lib/imageOCR'
 import { CameraCapture } from './components/CameraCapture'
@@ -46,6 +47,10 @@ function App() {
   const [pastScans, setPastScans] = useState([])
   const [pastScansLoading, setPastScansLoading] = useState(false)
   const [pastScansError, setPastScansError] = useState('')
+  const [aiRecommendations, setAiRecommendations] = useState([])
+  const [aiRecommendationsLoading, setAiRecommendationsLoading] = useState(false)
+  const [aiRecommendationsError, setAiRecommendationsError] = useState('')
+  const [aiRecommendationsSource, setAiRecommendationsSource] = useState('')
 
   const analysis = useMemo(
     () => analyzeIngredients(ingredientText, ingredientRules, ingredientSynonyms),
@@ -56,16 +61,10 @@ function App() {
     () => findFdaMatches(analysis.matches, foodSubstances),
     [analysis.matches, foodSubstances],
   )
-  const alternatives = findAlternatives({
-    catalog: storeCatalog,
-    currentBrand: brandName,
-    matches: analysis.matches,
-    category: inferredCategory,
-    store,
-  })
-  const storeRecommendations = useMemo(() => {
-    return storeCatalog.filter(item => item.store === store).slice(0, 5)
-  }, [store])
+  const storeCandidates = useMemo(
+    () => storeCatalog.filter((item) => item.store === store),
+    [store],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -125,6 +124,56 @@ function App() {
       cancelled = true
     }
   }, [currentUser])
+
+  useEffect(() => {
+    let cancelled = false
+    const timer = setTimeout(async () => {
+      if (!storeCandidates.length) {
+        setAiRecommendations([])
+        setAiRecommendationsSource('')
+        return
+      }
+
+      setAiRecommendationsLoading(true)
+      setAiRecommendationsError('')
+
+      try {
+        const result = await getHealthyRecommendations({
+          store,
+          productName: productName.trim(),
+          category: inferredCategory,
+          ingredientText,
+          flaggedIngredients: analysis.matches.map((item) => item.label),
+          candidates: storeCandidates,
+        })
+
+        if (cancelled) return
+        setAiRecommendations(result.recommendations)
+        setAiRecommendationsSource(result.source)
+      } catch (error) {
+        if (cancelled) return
+        setAiRecommendations([])
+        setAiRecommendationsError(error.message || 'Could not load Gemini recommendations')
+        setAiRecommendationsSource('')
+      } finally {
+        if (!cancelled) {
+          setAiRecommendationsLoading(false)
+        }
+      }
+    }, 700)
+
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [
+    store,
+    productName,
+    inferredCategory,
+    ingredientText,
+    analysis.matches,
+    storeCandidates,
+  ])
 
   const onSubmitAuth = async (event) => {
     event.preventDefault()
@@ -256,13 +305,13 @@ function App() {
           className={`${sectionCardClass} overflow-hidden bg-[radial-gradient(circle_at_top_left,_rgba(255,210,130,0.32),_transparent_30%),linear-gradient(180deg,rgba(255,251,245,0.95),rgba(244,247,239,0.92))]`}
         >
           <p className="mb-4 text-xs font-semibold uppercase tracking-[0.35em] text-amber-700">
-            ShelfScan
+            Label Lynx
           </p>
           <h1 className="max-w-4xl text-4xl font-semibold tracking-tight text-stone-950 md:text-6xl">
             Scan a grocery label, flag risky ingredients, and get a cleaner in-store alternative.
           </h1>
           <p className="mt-5 max-w-3xl text-base leading-7 text-stone-700 md:text-lg">
-            Compare food ingredients with US, EU, and Asia-facing rule set, explain why an additive is controversial, and provide alternatives in the grocery store the shopper is in.
+            Compare food ingredients with US, EU, and Asian standards, learn why an additive is controversial, and find alternatives in your grocery store.
           </p>
           <div className="mt-6 flex flex-wrap gap-3">
             <span className={storesBadgeClass}>{authStatus}</span>
@@ -371,7 +420,7 @@ function App() {
 
           <div className="grid gap-4 md:grid-cols-2">
             <label className="grid gap-2 text-sm font-medium text-stone-800">
-              <span>Grocery store</span>
+              <span>Grocery store*</span>
               <select className={inputClass} value={store} onChange={(event) => setStore(event.target.value)}>
                 {stores.map((option) => (
                   <option key={option}>{option}</option>
@@ -380,7 +429,7 @@ function App() {
             </label>
 
             <label className="grid gap-2 text-sm font-medium text-stone-800">
-              <span>Category</span>
+              <span>Category*</span>
               <select className={inputClass} value={category} onChange={(event) => setCategory(event.target.value)}>
                 <option value="snacks">Snacks</option>
                 <option value="cereal">Cereal</option>
@@ -393,12 +442,12 @@ function App() {
 
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             <label className="grid gap-2 text-sm font-medium text-stone-800">
-              <span>Brand</span>
+              <span>Brand*</span>
               <input className={inputClass} value={brandName} onChange={(event) => setBrandName(event.target.value)} />
             </label>
 
             <label className="grid gap-2 text-sm font-medium text-stone-800">
-              <span>Product name</span>
+              <span>Product name*</span>
               <input className={inputClass} value={productName} onChange={(event) => setProductName(event.target.value)} />
             </label>
           </div>
@@ -456,7 +505,7 @@ function App() {
               rows="9"
               value={ingredientText}
               onChange={(event) => setIngredientText(event.target.value)}
-              placeholder="Paste OCR output or type ingredients here..."
+              placeholder="type ingredients here..."
             />
           </label>
 
@@ -483,7 +532,7 @@ function App() {
         <div className={`${sectionCardClass} overflow-y-auto`}>
           <div className="mb-5">
             <h2 className="text-2xl font-semibold text-stone-950">Analysis</h2>
-            <p className="mt-1 text-sm text-stone-600">{productName} from {store}</p>
+            <p className="mt-1 text-sm text-stone-600">{productName} from {store}, Risk score 0/100 is no risk, Risk score 100/100 is high risk</p>
           </div>
 
           <div className="grid gap-3 md:grid-cols-3">
@@ -551,35 +600,47 @@ function App() {
       </section>
 
       <section className="mt-6">
-        <h2 className="mb-6 text-3xl font-semibold text-stone-950">Recommendations From {store}:</h2>
+        <h2 className="mb-6 text-3xl font-semibold text-stone-950">
+          Gemini-ranked recommendations for {store}
+        </h2>
         <div className={sectionCardClass}>
-          <div className="grid gap-3 grid-cols-2">
-            {alternatives.length ? (
-              alternatives.slice(0, 3).map((item) => (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <p className="text-sm text-stone-600">
+              {aiRecommendationsSource ? `Source: ${aiRecommendationsSource}` : 'Waiting for ranked results'}
+            </p>
+            {aiRecommendationsLoading ? (
+              <p className="text-sm text-amber-700">Ranking healthier options...</p>
+            ) : null}
+          </div>
+
+          {aiRecommendationsError ? (
+            <div className="mb-4 rounded-3xl border border-amber-200 bg-amber-50 p-4">
+              <p className="text-sm text-amber-800">{aiRecommendationsError}</p>
+            </div>
+          ) : null}
+
+          <div className="grid gap-3 md:grid-cols-2">
+            {aiRecommendations.length ? (
+              aiRecommendations.map((item) => (
                 <article
                   className="rounded-3xl border border-stone-200 bg-white p-4"
                   key={`${item.store}-${item.brand}-${item.product}`}
                 >
                   <h4 className="text-sm font-semibold text-stone-950">{item.product}</h4>
                   <p className="mt-1 text-xs text-stone-600">{item.brand}</p>
-                  <p className="mt-2 text-xs leading-5 text-stone-600">{item.pitch}</p>
+                  <p className="mt-2 text-xs leading-5 text-stone-600">
+                    {item.reason || item.pitch}
+                  </p>
+                  <p className="mt-2 text-xs leading-5 text-emerald-700">
+                    Why healthier: {item.whyHealthier || 'Lower-risk ingredient profile'}
+                  </p>
                 </article>
               ))
-            ) : null}
-            {storeRecommendations.length ? (
-              storeRecommendations.map((item) => (
-                <article
-                  className="rounded-3xl border border-stone-200 bg-white p-4"
-                  key={`${item.store}-${item.brand}-${item.product}`}
-                >
-                  <h4 className="text-sm font-semibold text-stone-950">{item.product}</h4>
-                  <p className="mt-1 text-xs text-emerald-700 font-medium">{item.brand}</p>
-                  <p className="mt-2 text-xs leading-5 text-stone-600 line-clamp-2">{item.pitch}</p>
-                </article>
-              ))
-            ) : null}
-            {!alternatives.length && !storeRecommendations.length && (
-              <p className="text-sm leading-6 text-stone-600">No recommendations available</p>
+            ) : (
+              <p className="text-sm leading-6 text-stone-600">
+                No recommendations available yet. Add a store, product, and ingredient list to rank
+                better options.
+              </p>
             )}
           </div>
         </div>

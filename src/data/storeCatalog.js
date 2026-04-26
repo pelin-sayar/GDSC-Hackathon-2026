@@ -1,0 +1,60 @@
+export const stores = ['Whole Foods', 'Trader Joe\'s', 'Target', 'Walmart', 'Costco']
+
+export const storeCatalog = [
+  {
+    store: 'Whole Foods',
+    category: 'snacks',
+    brand: 'Simple Mills',
+    product: 'Almond Flour Sea Salt Crackers',
+    avoids: ['bha', 'red_40', 'yellow_5', 'potassium_bromate'],
+    pitch: 'Short ingredient list with no artificial dyes or bromated flour.',
+  },
+  {
+    store: 'Whole Foods',
+    category: 'cereal',
+    brand: 'Cascadian Farm',
+    product: 'Organic Fruitful O\'s',
+    avoids: ['high_fructose_corn_syrup', 'red_40', 'yellow_5'],
+    pitch: 'Organic cereal line with fewer synthetic additives.',
+  },
+  {
+    store: 'Trader Joe\'s',
+    category: 'snacks',
+    brand: 'Trader Joe\'s',
+    product: 'Organic Elote Corn Chip Dippers',
+    avoids: ['bha', 'yellow_5', 'red_40'],
+    pitch: 'Trader Joe’s private label alternative without artificial food dyes.',
+  },
+  {
+    store: 'Trader Joe\'s',
+    category: 'candy',
+    brand: 'YumEarth',
+    product: 'Organic Fruit Snacks',
+    avoids: ['red_40', 'yellow_5', 'titanium_dioxide'],
+    pitch: 'Fruit-snack option colored with fruit and vegetable juices.',
+  },
+  {
+    store: 'Target',
+    category: 'bread',
+    brand: 'Dave\'s Killer Bread',
+    product: '21 Whole Grains and Seeds',
+    avoids: ['potassium_bromate', 'bha'],
+    pitch: 'Widely stocked loaf that avoids bromated flour and synthetic preservatives.',
+  },
+  {
+    store: 'Walmart',
+    category: 'drinks',
+    brand: 'Spindrift',
+    product: 'Lemon Sparkling Water',
+    avoids: ['sodium_benzoate', 'high_fructose_corn_syrup', 'yellow_5'],
+    pitch: 'Cleaner beverage pick with a minimal ingredient panel.',
+  },
+  {
+    store: 'Costco',
+    category: 'snacks',
+    brand: 'Late July',
+    product: 'Organic Sea Salt Tortilla Chips',
+    avoids: ['bha', 'red_40', 'yellow_5', 'palm_oil'],
+    pitch: 'Large-format snack option with a simpler fat and additive profile.',
+  },
+]

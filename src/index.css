@@ -1,0 +1,16 @@
+@import "tailwindcss";
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply min-h-screen min-w-[320px] bg-[radial-gradient(circle_at_top_left,_rgba(244,208,145,0.55),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(88,143,97,0.22),_transparent_24%),linear-gradient(180deg,#fff8ee_0%,#f4efe4_100%)] text-stone-900 antialiased;
+    font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  }
+
+  #root {
+    @apply min-h-screen;
+  }
+}

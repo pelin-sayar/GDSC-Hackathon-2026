@@ -453,7 +453,7 @@ function App() {
           </div>
 
           <label className="mt-4 grid gap-2 text-sm font-medium text-stone-800">
-            <span>Label photo</span>
+            <span>Label photo*</span>
             <div className="flex gap-3">
               <input
                 className="block flex-1 rounded-2xl border border-dashed border-stone-300 bg-stone-50 px-4 py-3 text-sm text-stone-700 file:mr-4 file:rounded-full file:border-0 file:bg-emerald-700 file:px-4 file:py-2 file:font-medium file:text-white hover:file:bg-emerald-800"

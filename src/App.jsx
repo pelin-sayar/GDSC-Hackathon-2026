@@ -7,6 +7,7 @@ import {
 } from 'firebase/auth'
 import { ingredientRules, ingredientSynonyms, regionLabels } from './data/ingredientRules'
 import { stores } from './data/storeCatalog'
+import { findAsiaMatchesByIngredient, loadAsiaStandards, summarizeAsiaStatus } from './lib/asiaStandards'
 import { CameraCapture } from './components/CameraCapture'
 import { auth } from './firebase'
 import { analyzeIngredients, deriveCategory } from './lib/analyzeIngredients'
@@ -40,6 +41,7 @@ function App() {
   const [savedImageDataUrl, setSavedImageDataUrl] = useState('')
   const [foodSubstances, setFoodSubstances] = useState([])
   const [euAdditives, setEuAdditives] = useState([])
+  const [asiaStandards, setAsiaStandards] = useState([])
   const [authStatus, setAuthStatus] = useState('checking auth')
   const [saveStatus, setSaveStatus] = useState('')
   const [walmartUrl, setWalmartUrl] = useState('')
@@ -89,6 +91,16 @@ function App() {
       .catch(() => {
         if (cancelled) return
         setEuAdditives([])
+      })
+
+    loadAsiaStandards()
+      .then((records) => {
+        if (cancelled) return
+        setAsiaStandards(records)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setAsiaStandards([])
       })
 
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -266,13 +278,28 @@ function App() {
         }
       }
 
-      const analysisResult = analyzeIngredients(
+      let analysisResult = analyzeIngredients(
         nextIngredientText,
         ingredientRules,
         ingredientSynonyms,
         foodSubstances,
         euAdditives,
       )
+      analysisResult = {
+        ...analysisResult,
+        matches: analysisResult.matches.map((match) => ({
+          ...match,
+          regions: {
+            ...match.regions,
+            asia:
+              summarizeAsiaStatus(
+                findAsiaMatchesByIngredient(match.label, asiaStandards).length
+                  ? findAsiaMatchesByIngredient(match.label, asiaStandards)
+                  : findAsiaMatchesByIngredient(match.rawIngredient || match.label, asiaStandards),
+              ) || match.regions?.asia || 'no direct Taiwan dataset match',
+          },
+        })),
+      }
       const nextInferredCategory = deriveCategory(category, nextIngredientText, analysisResult.matches)
       const nextFdaMatches = findFdaMatches(analysisResult.matches, foodSubstances)
 
@@ -623,7 +650,7 @@ function App() {
             </div>
             <div className="rounded-3xl border border-stone-200 bg-stone-50 p-5">
               <span className="text-sm text-stone-500">Risk score</span>
-              <strong className="mt-2 block text-3xl font-semibold text-stone-950">{analysis.score}/100</strong>
+              <strong className={`mt-2 block text-3xl font-semibold ${getRiskScoreTextClass(analysis.score)}`}>{analysis.score}/100</strong>
             </div>
             <div className="rounded-3xl border border-stone-200 bg-stone-50 p-5">
               <span className="text-sm text-stone-500">Category used</span>
@@ -921,7 +948,9 @@ function App() {
               <div className="rounded-3xl border border-stone-200 bg-stone-50 p-5">
                 <span className="text-sm text-stone-500">Risk score</span>
                 <strong className="mt-2 block text-3xl font-semibold text-stone-950">
-                  {selectedPastScan.riskScore || 0}/100
+                  <span className={getRiskScoreTextClass(selectedPastScan.riskScore || 0)}>
+                    {selectedPastScan.riskScore || 0}/100
+                  </span>
                 </strong>
               </div>
               <div className="rounded-3xl border border-stone-200 bg-stone-50 p-5">
@@ -1035,6 +1064,13 @@ function readableAuthError(error) {
     return 'Enable Email/Password auth in Firebase Console.'
 
   return 'Authentication failed.'
+}
+
+function getRiskScoreTextClass(score) {
+  if (score >= 75) return 'text-rose-700'
+  if (score >= 45) return 'text-amber-700'
+  if (score >= 20) return 'text-lime-700'
+  return 'text-emerald-700'
 }
 
 export default App

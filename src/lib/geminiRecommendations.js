@@ -1,6 +1,6 @@
 const GEMINI_MODEL = 'gemini-2.5-flash'
 const FRIENDLY_QUOTA_MESSAGE =
-  'Sorry! Since our app is free, there are limited API quotas and rate-limits, please type ingredients for now and try again later.'
+  'Sorry! Since our app is free, there are limited API quotas and rate-limits, please try again later.'
 
 export async function getHealthyRecommendations({
   store,

@@ -1,4 +1,6 @@
 const GEMINI_MODEL = 'gemini-2.5-flash'
+const FRIENDLY_QUOTA_MESSAGE =
+  'Sorry! Since our app is free, there are limited API quotas and rate-limits, please type ingredients for now and try again later.'
 
 export async function getHealthyRecommendations({
   store,
@@ -6,22 +8,15 @@ export async function getHealthyRecommendations({
   category,
   ingredientText,
   flaggedIngredients,
-  candidates,
 }) {
-  const fallback = buildFallbackRecommendations({
-    store,
-    productName,
-    category,
-    flaggedIngredients,
-    candidates,
-  })
-
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY
   if (!apiKey) {
     return {
-      source: 'fallback',
-      summary: 'Gemini API key is not configured, so local ranking was used.',
-      recommendations: fallback,
+      source: 'unavailable',
+      summary: 'Gemini API key is not configured, so web-grounded recommendations are unavailable.',
+      recommendations: [],
+      searchQueries: [],
+      citations: [],
     }
   }
 
@@ -31,9 +26,13 @@ export async function getHealthyRecommendations({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        tools: [
+          {
+            google_search: {},
+          },
+        ],
         generationConfig: {
           temperature: 0.2,
-          responseMimeType: 'application/json',
         },
         contents: [
           {
@@ -45,7 +44,6 @@ export async function getHealthyRecommendations({
                   category,
                   ingredientText,
                   flaggedIngredients,
-                  candidates,
                 }),
               },
             ],
@@ -57,51 +55,48 @@ export async function getHealthyRecommendations({
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => null)
-    throw new Error(
-      errorData?.error?.message || `Gemini recommendation error: ${response.statusText}`,
-    )
+    const message = errorData?.error?.message || `Gemini recommendation error: ${response.statusText}`
+    if (isGeminiQuotaError(message)) {
+      throw new Error(FRIENDLY_QUOTA_MESSAGE)
+    }
+    throw new Error(message)
   }
 
   const data = await response.json()
   const text = data?.candidates?.[0]?.content?.parts?.map((part) => part.text || '').join('\n') || ''
   const parsed = parseJson(text)
-  const recommendations = normalizeRecommendations(parsed, candidates, fallback)
+  const groundingMetadata = data?.candidates?.[0]?.groundingMetadata
 
   return {
-    source: 'gemini',
-    summary: parsed.summary || 'Gemini ranked the healthiest store options from the local catalog.',
-    recommendations,
+    source: 'gemini-google-search',
+    summary:
+      parsed.summary ||
+      `Gemini searched the web for healthier ${store} alternatives in ${category || 'this category'}.`,
+    recommendations: normalizeRecommendations(parsed, store),
+    searchQueries: groundingMetadata?.webSearchQueries || [],
+    citations: extractCitations(groundingMetadata),
   }
 }
 
-function buildPrompt({
-  store,
-  productName,
-  category,
-  ingredientText,
-  flaggedIngredients,
-  candidates,
-}) {
-  const candidateList = candidates
-    .map(
-      (item) =>
-        `- ${item.brand} | ${item.product} | category: ${item.category} | avoids: ${item.avoids.join(', ')} | pitch: ${item.pitch}`,
-    )
-    .join('\n')
-
+function buildPrompt({ store, productName, category, ingredientText, flaggedIngredients }) {
   const ingredientSnippet = ingredientText ? ingredientText.slice(0, 1200) : 'No ingredient text provided.'
   const flagged = flaggedIngredients.length ? flaggedIngredients.join(', ') : 'None flagged yet.'
 
   return [
     `You are helping a shopper choose healthier grocery options at ${store}.`,
+    'Use Google Search grounding to search the public web for currently available products.',
+    `Only recommend products when the web evidence suggests they are sold by or available through ${store}.`,
+    'Prefer official store product pages, manufacturer pages, or reputable grocery listings as evidence.',
     `Current product: ${productName || 'Unknown product'}.`,
     `Target category: ${category || 'unspecified'}.`,
     `Ingredients or OCR text: ${ingredientSnippet}`,
     `Flagged ingredients: ${flagged}`,
     '',
-    'Pick the best 3 recommendations ONLY from the candidate list below.',
-    'Rank by healthier ingredient profile, avoidance of flagged ingredients, and usefulness as a realistic store alternative.',
-    'Do not invent products that are not in the list.',
+    'Find 3 real, reasonable healthier alternatives for the selected store.',
+    'Prefer alternatives in the same category and similar use case as the current product.',
+    'Avoid recommending products that likely contain the same flagged ingredients when better options exist.',
+    'If availability evidence is weak, say so in the evidence field rather than inventing certainty.',
+    'Return only JSON. Do not wrap the JSON in markdown unless absolutely necessary.',
     'Return valid JSON with this shape:',
     '{',
     '  "summary": "one short sentence",',
@@ -109,15 +104,14 @@ function buildPrompt({
     '    {',
     '      "brand": "string",',
     '      "product": "string",',
+    '      "store": "string",',
     '      "reason": "string",',
     '      "whyHealthier": "string",',
+    '      "evidence": "short sentence about why you believe it is sold at the selected store",',
     '      "avoids": ["string"]',
     '    }',
     '  ]',
     '}',
-    '',
-    'Candidate list:',
-    candidateList,
   ].join('\n')
 }
 
@@ -132,72 +126,48 @@ function parseJson(text) {
   return JSON.parse(jsonText)
 }
 
-function normalizeRecommendations(parsed, candidates, fallback) {
+function normalizeRecommendations(parsed, fallbackStore) {
   if (!parsed?.recommendations?.length) {
-    return fallback
+    return []
   }
 
-  const candidateLookup = new Map(
-    candidates.map((item) => [`${item.brand}::${item.product}`.toLowerCase(), item]),
-  )
-
-  const normalized = parsed.recommendations
-    .map((item) => {
-      const key = `${item.brand || ''}::${item.product || ''}`.toLowerCase()
-      const match = candidateLookup.get(key)
-      if (!match) return null
-
-      return {
-        ...match,
-        reason: item.reason || match.pitch,
-        whyHealthier: item.whyHealthier || item.reason || match.pitch,
-        avoids: Array.isArray(item.avoids) && item.avoids.length ? item.avoids : match.avoids,
-      }
-    })
-    .filter(Boolean)
-
-  return normalized.length ? normalized.slice(0, 3) : fallback
-}
-
-function buildFallbackRecommendations({
-  store,
-  productName,
-  category,
-  flaggedIngredients,
-  candidates,
-}) {
-  const flaggedSet = new Set(flaggedIngredients.map(normalizeText))
-  const productTokens = normalizeText(productName).split(' ').filter(Boolean)
-
-  return candidates
-    .map((item) => {
-      const overlap = item.avoids.reduce(
-        (count, avoided) => count + (flaggedSet.has(normalizeText(avoided)) ? 1 : 0),
-        0,
-      )
-      const categoryBoost = item.category === category ? 2 : 0
-      const productSimilarity = productTokens.some((token) =>
-        normalizeText(`${item.brand} ${item.product}`).includes(token),
-      )
-        ? 1
-        : 0
-
-      return {
-        ...item,
-        score: overlap * 5 + categoryBoost + productSimilarity,
-        reason: item.pitch,
-        whyHealthier: `Prioritizes a simpler ingredient profile for ${store}.`,
-      }
-    })
-    .sort((left, right) => right.score - left.score || left.product.localeCompare(right.product))
+  return parsed.recommendations
+    .map((item) => ({
+      store: item.store || fallbackStore,
+      brand: item.brand || 'Unknown brand',
+      product: item.product || 'Unknown product',
+      reason: item.reason || item.evidence || 'Gemini identified this as a plausible healthier alternative.',
+      whyHealthier:
+        item.whyHealthier || item.reason || 'Likely a cleaner ingredient profile than the scanned product.',
+      evidence: item.evidence || '',
+      avoids: Array.isArray(item.avoids) ? item.avoids : [],
+    }))
+    .filter((item) => item.product)
     .slice(0, 3)
-    .map((item) => item)
 }
 
-function normalizeText(value = '') {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
+function extractCitations(groundingMetadata) {
+  const chunks = groundingMetadata?.groundingChunks || []
+  const seen = new Set()
+
+  return chunks
+    .map((chunk) => chunk?.web)
+    .filter((web) => web?.uri && web?.title)
+    .filter((web) => {
+      if (seen.has(web.uri)) return false
+      seen.add(web.uri)
+      return true
+    })
+}
+
+function isGeminiQuotaError(message) {
+  const normalized = String(message || '').toLowerCase()
+  return (
+    normalized.includes('quota exceeded') ||
+    normalized.includes('rate-limit') ||
+    normalized.includes('rate limit') ||
+    normalized.includes('resource exhausted') ||
+    normalized.includes('429') ||
+    normalized.includes('free_tier_requests')
+  )
 }

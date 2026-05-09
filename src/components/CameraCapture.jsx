@@ -4,6 +4,7 @@ export function CameraCapture({ onCapture, onCancel }) {
   const videoRef = useRef(null)
   const canvasRef = useRef(null)
   const streamRef = useRef(null)
+  const requestIdRef = useRef(0)
   const [isStarting, setIsStarting] = useState(true)
   const [isActive, setIsActive] = useState(false)
   const [error, setError] = useState('')
@@ -19,10 +20,13 @@ export function CameraCapture({ onCapture, onCancel }) {
   }, [facingMode])
 
   async function startCamera(nextFacingMode) {
+    const requestId = requestIdRef.current + 1
+    requestIdRef.current = requestId
+
     try {
       setIsStarting(true)
       setError('')
-      stopCamera()
+      stopCamera({ invalidate: false })
 
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -31,11 +35,28 @@ export function CameraCapture({ onCapture, onCancel }) {
         audio: false,
       })
 
+      if (requestId !== requestIdRef.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
+
       streamRef.current = stream
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream
-        await videoRef.current.play()
+        try {
+          await videoRef.current.play()
+        } catch (error) {
+          if (requestId !== requestIdRef.current || error?.name === 'AbortError') {
+            return
+          }
+          throw error
+        }
+      }
+
+      if (requestId !== requestIdRef.current) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
       }
 
       setIsActive(true)
@@ -46,10 +67,15 @@ export function CameraCapture({ onCapture, onCancel }) {
         setCanFlip(videoInputs.length > 1)
       }
     } catch (err) {
+      if (requestId !== requestIdRef.current) {
+        return
+      }
       setIsActive(false)
       setError(`Camera access failed: ${err.message}`)
     } finally {
-      setIsStarting(false)
+      if (requestId === requestIdRef.current) {
+        setIsStarting(false)
+      }
     }
   }
 
@@ -74,7 +100,11 @@ export function CameraCapture({ onCapture, onCancel }) {
     )
   }
 
-  function stopCamera() {
+  function stopCamera({ invalidate = true } = {}) {
+    if (invalidate) {
+      requestIdRef.current += 1
+    }
+
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop())
       streamRef.current = null
@@ -103,7 +133,7 @@ export function CameraCapture({ onCapture, onCancel }) {
           <div>
             <h2 className="text-2xl font-semibold">Take Picture</h2>
             <p className="mt-1 text-sm text-stone-300">
-              Capture the ingredients label. The image will be sent through the same Gemini OCR
+              Capture the ingredients label. The image will be processed with the same Gemini OCR
               flow as file uploads.
             </p>
           </div>

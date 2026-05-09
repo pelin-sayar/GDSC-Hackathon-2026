@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
@@ -6,32 +6,40 @@ import {
   signOut,
 } from 'firebase/auth'
 import { ingredientRules, ingredientSynonyms, regionLabels } from './data/ingredientRules'
-import { storeCatalog, stores } from './data/storeCatalog'
+import { stores } from './data/storeCatalog'
+import { CameraCapture } from './components/CameraCapture'
 import { auth } from './firebase'
 import { analyzeIngredients, deriveCategory } from './lib/analyzeIngredients'
+import { loadEuAdditives } from './lib/foodAdditivesEU'
 import { findFdaMatches, loadFoodSubstances } from './lib/foodSubstances'
 import { getHealthyRecommendations } from './lib/geminiRecommendations'
-import { saveScan, getUserScans, deleteScan } from './lib/scanHistory'
+import {
+  clearGuestScans,
+  deleteGuestScan,
+  deleteScan,
+  getGuestScans,
+  getUserScans,
+  migrateGuestScansToUser,
+  saveGuestScan,
+  saveScan,
+} from './lib/scanHistory'
 import { extractTextFromImage } from './lib/imageOCR'
-import { CameraCapture } from './components/CameraCapture'
-
-const sampleLabel = `Ingredients: Enriched wheat flour, sugar, palm oil, butylated hydroxyanisole (BHA), potassium bromate, red 40, yellow 5, natural flavors, sodium benzoate.`
-
-const storesBadgeClass =
-  'rounded-full border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-900'
-const sectionCardClass =
-  'rounded-[28px] border border-stone-200 bg-white/80 p-5 shadow-[0_20px_70px_rgba(20,35,25,0.08)] backdrop-blur md:p-7'
-const inputClass =
-  'w-full rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-900 outline-none transition focus:border-emerald-500 focus:ring-4 focus:ring-emerald-100'
 
 function App() {
+  // UI helpers
+  const sectionCardClass = 'rounded-3xl border border-stone-200 p-6 shadow-sm bg-white'
+  const storesBadgeClass = 'inline-block rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-800'
+  const inputClass = 'rounded-2xl border border-stone-300 bg-white px-4 py-3 text-sm text-stone-900 outline-none transition focus:border-emerald-500 focus:ring-4 focus:ring-emerald-100'
   const [store, setStore] = useState('Whole Foods')
   const [category, setCategory] = useState('snacks')
   const [productName, setProductName] = useState('')
   const [brandName, setBrandName] = useState('')
-  const [ingredientText, setIngredientText] = useState(sampleLabel)
+  const [ingredientText, setIngredientText] = useState('')
   const [imagePreview, setImagePreview] = useState('')
+  const [pendingImageFile, setPendingImageFile] = useState(null)
+  const [savedImageDataUrl, setSavedImageDataUrl] = useState('')
   const [foodSubstances, setFoodSubstances] = useState([])
+  const [euAdditives, setEuAdditives] = useState([])
   const [authStatus, setAuthStatus] = useState('checking auth')
   const [saveStatus, setSaveStatus] = useState('')
   const [walmartUrl, setWalmartUrl] = useState('')
@@ -51,20 +59,15 @@ function App() {
   const [aiRecommendationsLoading, setAiRecommendationsLoading] = useState(false)
   const [aiRecommendationsError, setAiRecommendationsError] = useState('')
   const [aiRecommendationsSource, setAiRecommendationsSource] = useState('')
-
-  const analysis = useMemo(
-    () => analyzeIngredients(ingredientText, ingredientRules, ingredientSynonyms),
-    [ingredientText],
-  )
-  const inferredCategory = deriveCategory(category, ingredientText, analysis.matches)
-  const fdaMatches = useMemo(
-    () => findFdaMatches(analysis.matches, foodSubstances),
-    [analysis.matches, foodSubstances],
-  )
-  const storeCandidates = useMemo(
-    () => storeCatalog.filter((item) => item.store === store),
-    [store],
-  )
+  const [aiRecommendationQueries, setAiRecommendationQueries] = useState([])
+  const [aiRecommendationCitations, setAiRecommendationCitations] = useState([])
+  const [isMigratingGuestScans, setIsMigratingGuestScans] = useState(false)
+  const [searchLoading, setSearchLoading] = useState(false)
+  const [selectedPastScan, setSelectedPastScan] = useState(null)
+  // Ingredient analysis and recommendations
+  const [analysis, setAnalysis] = useState({ matches: [], normalized: [], score: 0 })
+  const [inferredCategory, setInferredCategory] = useState(category)
+  const [fdaMatches, setFdaMatches] = useState([])
 
   useEffect(() => {
     let cancelled = false
@@ -76,6 +79,16 @@ function App() {
       })
       .catch(() => {
         if (cancelled) return
+      })
+
+    loadEuAdditives()
+      .then((records) => {
+        if (cancelled) return
+        setEuAdditives(records)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setEuAdditives([])
       })
 
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -91,32 +104,44 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (!currentUser) {
-      return
-    }
-
     let cancelled = false
 
     Promise.resolve()
-      .then(() => {
+      .then(async () => {
         if (cancelled) return
         setPastScansLoading(true)
         setPastScansError('')
-        return getUserScans(currentUser.uid)
-      })
-      .then((scans) => {
+
+        if (!currentUser) {
+          setPastScans(getGuestScans())
+          return
+        }
+
+        const guestScans = getGuestScans()
+        if (guestScans.length) {
+          setIsMigratingGuestScans(true)
+          await migrateGuestScansToUser({
+            userId: currentUser.uid,
+            userEmail: currentUser.email || null,
+          })
+          if (cancelled) return
+          clearGuestScans()
+          setIsMigratingGuestScans(false)
+        }
+
+        const scans = await getUserScans(currentUser.uid)
         if (cancelled) return
-        console.log('Loaded scans:', scans)
         setPastScans(scans)
       })
       .catch((error) => {
         if (cancelled) return
         console.error('Error loading past scans:', error.message || error)
         setPastScansError(error.message || 'Failed to load scans')
-        setPastScans([])
+        setPastScans(currentUser ? [] : getGuestScans())
       })
       .finally(() => {
         if (cancelled) return
+        setIsMigratingGuestScans(false)
         setPastScansLoading(false)
       })
 
@@ -125,55 +150,7 @@ function App() {
     }
   }, [currentUser])
 
-  useEffect(() => {
-    let cancelled = false
-    const timer = setTimeout(async () => {
-      if (!storeCandidates.length) {
-        setAiRecommendations([])
-        setAiRecommendationsSource('')
-        return
-      }
-
-      setAiRecommendationsLoading(true)
-      setAiRecommendationsError('')
-
-      try {
-        const result = await getHealthyRecommendations({
-          store,
-          productName: productName.trim(),
-          category: inferredCategory,
-          ingredientText,
-          flaggedIngredients: analysis.matches.map((item) => item.label),
-          candidates: storeCandidates,
-        })
-
-        if (cancelled) return
-        setAiRecommendations(result.recommendations)
-        setAiRecommendationsSource(result.source)
-      } catch (error) {
-        if (cancelled) return
-        setAiRecommendations([])
-        setAiRecommendationsError(error.message || 'Could not load Gemini recommendations')
-        setAiRecommendationsSource('')
-      } finally {
-        if (!cancelled) {
-          setAiRecommendationsLoading(false)
-        }
-      }
-    }, 700)
-
-    return () => {
-      cancelled = true
-      clearTimeout(timer)
-    }
-  }, [
-    store,
-    productName,
-    inferredCategory,
-    ingredientText,
-    analysis.matches,
-    storeCandidates,
-  ])
+  // (Removed Gemini API recommendations effect; using mock recommendations only)
 
   const onSubmitAuth = async (event) => {
     event.preventDefault()
@@ -211,76 +188,168 @@ function App() {
     const file = event.target.files?.[0]
     if (!file) return
 
+    setPendingImageFile(file)
+    setOcrError('')
+    void updateSavedImageDataUrl(file)
     const nextUrl = URL.createObjectURL(file)
     setImagePreview((previous) => {
       if (previous) URL.revokeObjectURL(previous)
       return nextUrl
     })
-    
-    // Auto-extract text from uploaded image
-    processImageForOCR(file)
   }
 
   const processImageForOCR = async (imageFile) => {
-    if (!currentUser) {
-      setOcrError('Sign in before scanning labels')
-      return
-    }
-
     setOcrLoading(true)
     setOcrError('')
 
     try {
       const extractedText = await extractTextFromImage(imageFile)
       if (extractedText.trim()) {
-        setIngredientText(extractedText)
+        return extractedText.trim()
       } else {
         setOcrError('No text found in image. Please try another photo or enter text manually.')
+        return ''
       }
     } catch (error) {
-      setOcrError(`OCR error: ${error.message}. Please enter text manually.`)
+      setOcrError(error.message || 'Please enter text manually.')
       console.error('OCR error:', error)
+      return ''
     } finally {
       setOcrLoading(false)
     }
   }
 
+  const updateSavedImageDataUrl = async (file) => {
+    try {
+      const dataUrl = await loadImageDataUrl(file)
+      setSavedImageDataUrl(dataUrl)
+    } catch (error) {
+      console.error('Failed to prepare saved image:', error)
+      setSavedImageDataUrl('')
+    }
+  }
+
   const onCameraCapture = async (blob) => {
     const file = new File([blob], `photo-${Date.now()}.jpg`, { type: 'image/jpeg' })
-    
+    setPendingImageFile(file)
+    setOcrError('')
+    void updateSavedImageDataUrl(file)
+
     const nextUrl = URL.createObjectURL(blob)
     setImagePreview((previous) => {
       if (previous) URL.revokeObjectURL(previous)
       return nextUrl
     })
-    
+
     setShowCamera(false)
-    await processImageForOCR(file)
   }
 
-  const onSaveScan = async () => {
-    if (!currentUser) {
-      setSaveStatus('Sign in before saving scans')
-      return
-    }
-
-    setSaveStatus('Saving scan...')
+  const onSearch = async () => {
+    setSearchLoading(true)
+    setSaveStatus('')
+    setAiRecommendationsLoading(true)
+    setAiRecommendationsError('')
+    setAiRecommendationsSource('')
+    setAiRecommendations([])
+    setAiRecommendationQueries([])
+    setAiRecommendationCitations([])
 
     try {
-      await saveScan({
-        userId: currentUser.uid,
-        userEmail: currentUser.email || null,
+      let nextIngredientText = ingredientText.trim()
+
+      if (pendingImageFile) {
+        const extractedText = await processImageForOCR(pendingImageFile)
+        if (extractedText) {
+          nextIngredientText = extractedText
+          setIngredientText(extractedText)
+          setPendingImageFile(null)
+        }
+      }
+
+      const analysisResult = analyzeIngredients(
+        nextIngredientText,
+        ingredientRules,
+        ingredientSynonyms,
+        foodSubstances,
+        euAdditives,
+      )
+      const nextInferredCategory = deriveCategory(category, nextIngredientText, analysisResult.matches)
+      const nextFdaMatches = findFdaMatches(analysisResult.matches, foodSubstances)
+
+      setAnalysis(analysisResult)
+      setInferredCategory(nextInferredCategory)
+      setFdaMatches(nextFdaMatches)
+
+      const result = await getHealthyRecommendations({
         store,
-        category: inferredCategory,
         productName,
-        brandName,
-        ingredientText,
-        flaggedIngredients: analysis.matches.map((item) => item.label),
-        fdaMatches: fdaMatches.map((item) => item.substance),
-        riskScore: analysis.score,
-        walmartUrl,
+        category,
+        ingredientText: nextIngredientText,
+        flaggedIngredients: analysisResult.matches.map((item) => item.label),
       })
-      setSaveStatus('Saved Successfully')
+
+      setAiRecommendations(result.recommendations)
+      setAiRecommendationsSource(result.source)
+      setAiRecommendationQueries(result.searchQueries || [])
+      setAiRecommendationCitations(result.citations || [])
+      await persistScanSnapshot({
+        ingredientText: nextIngredientText,
+        inferredCategory: nextInferredCategory,
+        analysisResult,
+        nextFdaMatches,
+        recommendationResult: result,
+      })
+    } catch (error) {
+      console.error('Search error:', error)
+      setAiRecommendationsError(error.message || 'Failed to get recommendations')
+    } finally {
+      setAiRecommendationsLoading(false)
+      setSearchLoading(false)
+    }
+  }
+
+  const persistScanSnapshot = async ({
+    ingredientText: ingredientTextToSave,
+    inferredCategory: categoryToSave,
+    analysisResult,
+    nextFdaMatches,
+    recommendationResult,
+  }) => {
+    setSaveStatus('Saving scan...')
+
+    const scanPayload = {
+      store,
+      category: categoryToSave,
+      productName,
+      brandName,
+      ingredientText: ingredientTextToSave,
+      flaggedIngredients: analysisResult.matches.map((item) => item.label),
+      analysisMatches: analysisResult.matches,
+      fdaMatches: nextFdaMatches.map((item) => item.substance),
+      riskScore: analysisResult.score,
+      recommendations: recommendationResult.recommendations || [],
+      recommendationSource: recommendationResult.source || '',
+      recommendationQueries: recommendationResult.searchQueries || [],
+      recommendationCitations: recommendationResult.citations || [],
+      imageDataUrl: savedImageDataUrl,
+      walmartUrl,
+    }
+
+    try {
+      if (currentUser) {
+        await saveScan({
+          ...scanPayload,
+          userId: currentUser.uid,
+          userEmail: currentUser.email || null,
+        })
+        const scans = await getUserScans(currentUser.uid)
+        setPastScans(scans)
+        setSaveStatus('Search saved to your account')
+      } else {
+        const savedGuestScan = saveGuestScan(scanPayload)
+        setPastScans((prev) => [savedGuestScan, ...prev.filter((scan) => scan.id !== savedGuestScan.id)])
+        setSaveStatus('Search saved for this session. Sign in before leaving the page to keep it.')
+      }
     } catch (error) {
       console.error('Save error:', error)
       setSaveStatus(`Could not save scan: ${error.message}`)
@@ -290,7 +359,12 @@ function App() {
   const onDeleteScan = async (scanId) => {
     if (!scanId) return
     try {
-      await deleteScan(scanId)
+      if (scanId.startsWith('guest-')) {
+        deleteGuestScan(scanId)
+      } else {
+        await deleteScan(scanId)
+      }
+      setSelectedPastScan((current) => (current?.id === scanId ? null : current))
       setPastScans((prev) => prev.filter((s) => s.id !== scanId))
     } catch (error) {
       console.error('Failed to delete scan:', error)
@@ -414,7 +488,7 @@ function App() {
           <div className="mb-5">
             <h2 className="text-2xl font-semibold text-stone-950">Scan</h2>
             <p className="mt-1 text-sm text-stone-600">
-              Use a live photo, or type in ingredients.
+              Use a live photo, or type in ingredients. The app compares flagged ingredients across all supported regions automatically.
             </p>
           </div>
 
@@ -492,6 +566,8 @@ function App() {
                 <p className="mt-3 text-sm text-amber-600">Extracting text from image...</p>
               ) : ocrError ? (
                 <p className="mt-3 text-sm text-rose-600">{ocrError}</p>
+              ) : pendingImageFile ? (
+                <p className="mt-3 text-sm text-stone-600">Photo ready. Click Search to search.</p>
               ) : (
                 <p className="mt-3 text-sm text-emerald-600">✓ Text extracted and loaded below</p>
               )}
@@ -511,20 +587,25 @@ function App() {
 
           <div className="mt-5 flex flex-wrap gap-3">
             <button
-              className="rounded-full bg-stone-950 px-5 py-3 text-sm font-medium text-white transition hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-full bg-emerald-600 px-5 py-3 text-sm font-medium text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
               type="button"
-              onClick={onSaveScan}
-              disabled={!currentUser}
+              onClick={onSearch}
+              disabled={searchLoading || aiRecommendationsLoading}
             >
-              Save scan
+              {searchLoading || aiRecommendationsLoading ? 'Searching...' : 'Search'}
             </button>
-            <button
-              className="rounded-full bg-stone-200 px-5 py-3 text-sm font-medium text-stone-800 transition hover:bg-stone-300"
-              type="button"
-              onClick={() => setIngredientText('')}
-            >
-              Clear text
-            </button>
+              <button
+                className="rounded-full bg-stone-200 px-5 py-3 text-sm font-medium text-stone-800 transition hover:bg-stone-300"
+                type="button"
+                onClick={() => {
+                  setIngredientText('')
+                  setOcrError('')
+                  setPendingImageFile(null)
+                  setSavedImageDataUrl('')
+                }}
+              >
+                Clear text
+              </button>
           </div>
           {saveStatus ? <p className="mt-3 text-sm text-stone-600">{saveStatus}</p> : null}
         </form>
@@ -573,14 +654,33 @@ function App() {
                     </span>
                   </div>
                   <div className="mt-4 grid gap-3 md:grid-cols-3">
-                    {Object.entries(match.regions).map(([region, status]) => (
-                      <div className="rounded-2xl bg-stone-50 p-4" key={region}>
-                        <span className="text-xs uppercase tracking-wide text-stone-500">{regionLabels[region]}</span>
-                        <strong className="mt-2 block text-sm font-semibold text-stone-900">{status}</strong>
-                      </div>
-                    ))}
+                    {match.regions ? (
+                      Object.entries(match.regions).map(([region, status]) => (
+                        <div className="rounded-2xl bg-stone-50 p-4" key={region}>
+                          <span className="text-xs uppercase tracking-wide text-stone-500">{regionLabels[region]}</span>
+                          <strong className="mt-2 block text-sm font-semibold text-stone-900">{status}</strong>
+                        </div>
+                      ))
+                    ) : (
+                      <>
+                        <div className="rounded-2xl bg-stone-50 p-4">
+                          <span className="text-xs uppercase tracking-wide text-stone-500">E-code</span>
+                          <strong className="mt-2 block text-sm font-semibold text-stone-900">{match.eCode || 'Not listed'}</strong>
+                        </div>
+                        <div className="rounded-2xl bg-stone-50 p-4">
+                          <span className="text-xs uppercase tracking-wide text-stone-500">Food category</span>
+                          <strong className="mt-2 block text-sm font-semibold text-stone-900">{match.foodCategory || 'Unknown'}</strong>
+                        </div>
+                        <div className="rounded-2xl bg-stone-50 p-4">
+                          <span className="text-xs uppercase tracking-wide text-stone-500">EU restriction</span>
+                          <strong className="mt-2 block text-sm font-semibold text-stone-900">{match.restriction || 'Listed'}</strong>
+                        </div>
+                      </>
+                    )}
                   </div>
-                  <p className="mt-4 text-sm leading-6 text-stone-600">Why it matters: {match.why}</p>
+                  <p className="mt-4 text-sm leading-6 text-stone-600">
+                    Why it matters: {match.why || match.restrictionComment || match.legislation || 'This additive is present in the selected regulatory dataset.'}
+                  </p>
                 </article>
               ))}
             </div>
@@ -589,11 +689,6 @@ function App() {
               <h3 className="text-lg font-semibold text-stone-950">
                 No flagged ingredients found in the current rule set.
               </h3>
-              <p className="mt-2 text-sm leading-6 text-stone-600">
-                The analyzer only knows about ingredients loaded into the prototype dataset. That
-                is where your Open Food Facts, IngrediCheck, and EAFUS ingestion jobs would expand
-                coverage.
-              </p>
             </div>
           )}
         </div>
@@ -601,7 +696,7 @@ function App() {
 
       <section className="mt-6">
         <h2 className="mb-6 text-3xl font-semibold text-stone-950">
-          Gemini-ranked recommendations for {store}
+          Gemini recommendations for {store}
         </h2>
         <div className={sectionCardClass}>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -619,106 +714,165 @@ function App() {
             </div>
           ) : null}
 
+          {aiRecommendationQueries.length ? (
+            <div className="mb-4 rounded-3xl border border-stone-200 bg-stone-50 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-stone-500">Search queries</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {aiRecommendationQueries.map((query) => (
+                  <span key={query} className="rounded-full bg-white px-3 py-1 text-xs text-stone-700">
+                    {query}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
           <div className="grid gap-3 md:grid-cols-2">
             {aiRecommendations.length ? (
               aiRecommendations.map((item) => (
                 <article
                   className="rounded-3xl border border-stone-200 bg-white p-4"
-                  key={`${item.store}-${item.brand}-${item.product}`}
+                  key={`${item.store || store}-${item.brand}-${item.product}`}
                 >
-                  <h4 className="text-sm font-semibold text-stone-950">{item.product}</h4>
-                  <p className="mt-1 text-xs text-stone-600">{item.brand}</p>
-                  <p className="mt-2 text-xs leading-5 text-stone-600">
-                    {item.reason || item.pitch}
-                  </p>
-                  <p className="mt-2 text-xs leading-5 text-emerald-700">
-                    Why healthier: {item.whyHealthier || 'Lower-risk ingredient profile'}
-                  </p>
+                  <h4 className="text-lg font-semibold text-stone-950">{item.product}</h4>
+                  <p className="mt-1 text-xs text-stone-600">Brand: {item.brand}</p>
+                  <p className="mt-1 text-xs text-stone-600">Store: {item.store || store}</p>
+                  <p className="mt-2 text-xs leading-5 text-stone-600">Reason: {item.reason}</p>
+                  <p className="mt-2 text-xs leading-5 text-emerald-700">Why healthier: {item.whyHealthier}</p>
+                  {item.evidence ? (
+                    <p className="mt-2 text-xs text-stone-500">Availability evidence: {item.evidence}</p>
+                  ) : null}
+                  {item.avoids?.length ? (
+                    <p className="mt-2 text-xs text-stone-500">Avoids: {item.avoids.join(', ')}</p>
+                  ) : null}
+                  {item.comparedTo && (
+                    <p className="mt-2 text-xs text-stone-500">Compared to: {item.comparedTo}</p>
+                  )}
+                  {item.ingredientDiff && item.ingredientDiff.length > 0 && (
+                    <div className="mt-2">
+                      <span className="text-xs text-stone-700">Ingredient differences:</span>
+                      <ul className="ml-4 list-disc text-xs text-stone-700">
+                        {item.ingredientDiff.map((diff, i) => (
+                          <li key={i}>{diff}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </article>
               ))
             ) : (
               <p className="text-sm leading-6 text-stone-600">
-                No recommendations available yet. Add a store, product, and ingredient list to rank
-                better options.
+                No recommendations available yet. Add a store, product, or ingredient
+                list so Gemini can search for healthier alternatives.
               </p>
             )}
           </div>
+
+          {aiRecommendationCitations.length ? (
+            <div className="mt-4 rounded-3xl border border-stone-200 bg-stone-50 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-stone-500">Sources</p>
+              <div className="mt-3 grid gap-2">
+                {aiRecommendationCitations.slice(0, 8).map((source) => (
+                  <a
+                    key={source.uri}
+                    className="text-sm text-emerald-700 underline underline-offset-2"
+                    href={source.uri}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {source.title}
+                  </a>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
       </section>
 
-      {currentUser && (
-        <section className="mt-8">
-          <h2 className="mb-6 text-3xl font-semibold text-stone-950">Past Scans:</h2>
-          {pastScansError && (
-            <div className={`${sectionCardClass} bg-red-50`}>
-              <p className="text-red-700">Error: {pastScansError}</p>
-            </div>
-          )}
-          {pastScansLoading ? (
-            <div className={`${sectionCardClass}`}>
-              <p className="text-stone-600">Loading your scans...</p>
-            </div>
-          ) : pastScans.length > 0 ? (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {pastScans.map((scan) => (
-                <div
-                  key={scan.id}
-                  className={`${sectionCardClass}`}
-                >
-                  <div className="space-y-3">
-                      <div className="flex items-start justify-between">
-                        <div>
-                          <h3 className="font-semibold text-stone-950">{scan.productName}</h3>
-                          <p className="text-xs text-stone-600">{scan.brandName}</p>
-                        </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            onDeleteScan(scan.id)
-                          }}
-                          aria-label="Delete scan"
-                          title="Delete scan"
-                          className="inline-flex h-9 w-9 items-center justify-center rounded-full text-red-600 hover:text-red-800"
-                        >
-                          <span aria-hidden="true" className="text-xl font-extrabold leading-none">×</span>
-                        </button>
+      <section className="mt-8">
+        <h2 className="mb-6 text-3xl font-semibold text-stone-950">
+          {currentUser ? 'Past Scans:' : 'Session Scans:'}
+        </h2>
+        {!currentUser ? (
+          <p className="mb-4 text-sm text-stone-600">
+            Guest scans last only for this browser session. Create or sign in to an account before
+            leaving the page if you want to keep them.
+          </p>
+        ) : null}
+        {pastScansError && (
+          <div className={`${sectionCardClass} bg-red-50`}>
+            <p className="text-red-700">Error: {pastScansError}</p>
+          </div>
+        )}
+        {pastScansLoading ? (
+          <div className={`${sectionCardClass}`}>
+            <p className="text-stone-600">
+              {isMigratingGuestScans ? 'Saving your guest scans to your account...' : 'Loading your scans...'}
+            </p>
+          </div>
+        ) : pastScans.length > 0 ? (
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {pastScans.map((scan) => (
+              <div
+                key={scan.id}
+                className={`${sectionCardClass} cursor-pointer transition hover:-translate-y-0.5 hover:shadow-md`}
+                onClick={() => setSelectedPastScan(scan)}
+              >
+                <div className="space-y-3">
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <h3 className="font-semibold text-stone-950">{scan.productName}</h3>
+                        <p className="text-xs text-stone-600">{scan.brandName}</p>
                       </div>
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-medium text-stone-600">{scan.store}</span>
-                      <span
-                        className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
-                          scan.riskScore >= 60
-                            ? 'bg-red-100 text-red-700'
-                            : scan.riskScore >= 30
-                              ? 'bg-yellow-100 text-yellow-700'
-                              : 'bg-green-100 text-green-700'
-                        }`}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onDeleteScan(scan.id)
+                        }}
+                        aria-label="Delete scan"
+                        title="Delete scan"
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-full text-red-600 hover:text-red-800"
                       >
-                        Risk: {scan.riskScore}/100
-                      </span>
+                        <span aria-hidden="true" className="text-xl font-extrabold leading-none">×</span>
+                      </button>
                     </div>
-                    <p className="line-clamp-2 text-xs text-stone-600">
-                      {scan.ingredientText.substring(0, 80)}...
-                    </p>
-                    {scan.createdAt && (
-                      <p className="text-xs text-stone-500">
-                        {(() => {
-                          const date = scan.createdAt?.toDate ? scan.createdAt.toDate() : new Date(scan.createdAt)
-                          return date.toLocaleDateString()
-                        })()}
-                      </p>
-                    )}
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-stone-600">{scan.store}</span>
+                    <span
+                      className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${
+                        scan.riskScore >= 60
+                          ? 'bg-red-100 text-red-700'
+                          : scan.riskScore >= 30
+                            ? 'bg-yellow-100 text-yellow-700'
+                            : 'bg-green-100 text-green-700'
+                      }`}
+                    >
+                      Risk: {scan.riskScore}/100
+                    </span>
                   </div>
+                  <p className="line-clamp-2 text-xs text-stone-600">
+                    {scan.ingredientText.substring(0, 80)}...
+                  </p>
+                  {scan.createdAt ? (
+                    <p className="text-xs text-stone-500">
+                      {(() => {
+                        const date = scan.createdAt?.toDate ? scan.createdAt.toDate() : new Date(scan.createdAt)
+                        return date.toLocaleDateString()
+                      })()}
+                    </p>
+                  ) : null}
                 </div>
-              ))}
-            </div>
-          ) : (
-            <div className={`${sectionCardClass}`}>
-              <p className="text-stone-600">No saved scans yet. Start by scanning a label!</p>
-            </div>
-          )}
-        </section>
-      )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className={`${sectionCardClass}`}>
+            <p className="text-stone-600">
+              {currentUser ? 'No saved scans yet. Start by scanning a label!' : 'No session scans yet. Start by scanning a label!'}
+            </p>
+          </div>
+        )}
+      </section>
 
       {showCamera && (
         <CameraCapture
@@ -726,8 +880,148 @@ function App() {
           onCancel={() => setShowCamera(false)}
         />
       )}
+
+      {selectedPastScan ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-950/70 p-4 backdrop-blur-sm">
+          <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto rounded-[32px] bg-white p-6 shadow-2xl md:p-8">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-amber-700">Past Scan</p>
+                <h3 className="mt-2 text-3xl font-semibold text-stone-950">{selectedPastScan.productName || 'Saved scan'}</h3>
+                <p className="mt-2 text-sm text-stone-600">
+                  {selectedPastScan.brandName || 'Unknown brand'} at {selectedPastScan.store}
+                </p>
+              </div>
+              <button
+                className="rounded-full border border-stone-300 px-4 py-2 text-sm font-medium text-stone-700 transition hover:bg-stone-100"
+                type="button"
+                onClick={() => setSelectedPastScan(null)}
+              >
+                Close
+              </button>
+            </div>
+
+            {selectedPastScan.imageDataUrl ? (
+              <div className="mt-6 rounded-3xl border border-stone-200 bg-stone-50 p-4">
+                <img
+                  className="max-h-80 w-full rounded-2xl object-contain"
+                  src={selectedPastScan.imageDataUrl}
+                  alt="Saved scan preview"
+                />
+              </div>
+            ) : null}
+
+            <div className="mt-6 grid gap-4 md:grid-cols-3">
+              <div className="rounded-3xl border border-stone-200 bg-stone-50 p-5">
+                <span className="text-sm text-stone-500">Flagged ingredients</span>
+                <strong className="mt-2 block text-3xl font-semibold text-stone-950">
+                  {selectedPastScan.analysisMatches?.length || 0}
+                </strong>
+              </div>
+              <div className="rounded-3xl border border-stone-200 bg-stone-50 p-5">
+                <span className="text-sm text-stone-500">Risk score</span>
+                <strong className="mt-2 block text-3xl font-semibold text-stone-950">
+                  {selectedPastScan.riskScore || 0}/100
+                </strong>
+              </div>
+              <div className="rounded-3xl border border-stone-200 bg-stone-50 p-5">
+                <span className="text-sm text-stone-500">Category</span>
+                <strong className="mt-2 block text-3xl font-semibold capitalize text-stone-950">
+                  {selectedPastScan.category || 'snacks'}
+                </strong>
+              </div>
+            </div>
+
+            <section className="mt-6">
+              <h4 className="text-xl font-semibold text-stone-950">Ingredient analysis</h4>
+              {selectedPastScan.analysisMatches?.length ? (
+                <div className="mt-4 grid gap-4">
+                  {selectedPastScan.analysisMatches.map((match, index) => (
+                    <article className="rounded-3xl border border-stone-200 bg-white p-5" key={`${match.key || match.label}-${index}`}>
+                      <div className="grid gap-4 md:grid-cols-[1fr_auto] md:items-start">
+                        <div>
+                          <h5 className="text-lg font-semibold text-stone-950">{match.label}</h5>
+                          <p className="mt-1 text-sm leading-6 text-stone-600">{match.reason}</p>
+                        </div>
+                        <span
+                          className={[
+                            'inline-flex rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-wide',
+                            match.severity === 'high' && 'bg-rose-100 text-rose-700',
+                            match.severity === 'medium' && 'bg-amber-100 text-amber-700',
+                            match.severity === 'low' && 'bg-emerald-100 text-emerald-700',
+                          ]
+                            .filter(Boolean)
+                            .join(' ')}
+                        >
+                          {match.severity}
+                        </span>
+                      </div>
+                      {match.regions ? (
+                        <div className="mt-4 grid gap-3 md:grid-cols-3">
+                          {Object.entries(match.regions).map(([region, status]) => (
+                            <div className="rounded-2xl bg-stone-50 p-4" key={region}>
+                              <span className="text-xs uppercase tracking-wide text-stone-500">{regionLabels[region]}</span>
+                              <strong className="mt-2 block text-sm font-semibold text-stone-900">{status}</strong>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                      <p className="mt-4 text-sm leading-6 text-stone-600">
+                        Why it matters: {match.why || match.restrictionComment || match.legislation || 'This ingredient was flagged in the saved scan.'}
+                      </p>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-4 rounded-3xl border border-emerald-100 bg-emerald-50 p-5">
+                  <p className="text-sm text-stone-700">No flagged ingredients were stored for this scan.</p>
+                </div>
+              )}
+            </section>
+
+            <section className="mt-6">
+              <h4 className="text-xl font-semibold text-stone-950">Recommended alternatives</h4>
+              {selectedPastScan.recommendations?.length ? (
+                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  {selectedPastScan.recommendations.map((item, index) => (
+                    <article
+                      className="rounded-3xl border border-stone-200 bg-white p-4"
+                      key={`${item.store || selectedPastScan.store}-${item.brand}-${item.product}-${index}`}
+                    >
+                      <h5 className="text-lg font-semibold text-stone-950">{item.product}</h5>
+                      <p className="mt-1 text-xs text-stone-600">Brand: {item.brand}</p>
+                      <p className="mt-1 text-xs text-stone-600">Store: {item.store || selectedPastScan.store}</p>
+                      <p className="mt-2 text-xs leading-5 text-stone-600">Reason: {item.reason}</p>
+                      <p className="mt-2 text-xs leading-5 text-emerald-700">Why healthier: {item.whyHealthier}</p>
+                      {item.evidence ? (
+                        <p className="mt-2 text-xs text-stone-500">Availability evidence: {item.evidence}</p>
+                      ) : null}
+                      {item.avoids?.length ? (
+                        <p className="mt-2 text-xs text-stone-500">Avoids: {item.avoids.join(', ')}</p>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-4 rounded-3xl border border-stone-200 bg-stone-50 p-5">
+                  <p className="text-sm text-stone-700">No recommendations were saved for this scan.</p>
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
+      ) : null}
     </main>
   )
+}
+
+function loadImageDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '')
+    reader.onerror = () => reject(reader.error || new Error('Failed to read image'))
+    reader.readAsDataURL(file)
+  })
 }
 
 function readableAuthError(error) {

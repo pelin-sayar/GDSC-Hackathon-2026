@@ -34,6 +34,22 @@ export function findFdaMatches(matches, foodSubstances) {
     .filter(Boolean)
 }
 
+export function findFoodSubstanceByIngredient(ingredient, foodSubstances) {
+  if (!ingredient || !foodSubstances.length) return null
+
+  const normalized = normalizeText(ingredient)
+  if (!normalized) return null
+
+  return (
+    foodSubstances.find(
+      (row) =>
+        row.substanceNormalized === normalized ||
+        row.searchBlob.includes(normalized) ||
+        normalized.includes(row.substanceNormalized),
+    ) || null
+  )
+}
+
 function parseFoodSubstancesCsv(csvText) {
   const lines = csvText.split(/\r?\n/)
   const headerIndex = lines.findIndex((line) => line.startsWith('CAS Reg No'))
